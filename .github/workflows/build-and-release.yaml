@@ -1,144 +1,161 @@
-name: Build Release
+name: Build Conda Env (CUDA)
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "conda environmant name"
+        type: string   
+        required: false
+        default: 'win_llamacppgpu'
+      target_folder:
+        description: 'Envs path (must be on D drive)'
+        type: string
+        required: false
+        default: 'D:\conda_envs_jianlins'
 
 permissions:
   contents: write
 
 jobs:
+  define_matrix:
+    name: Define Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Define Job Output
+        id: set-matrix
+        run: |
+          $matrix = @{
+              'os' = @('windows-2019')
+              'pyver' = @("3.10", "3.12")
+              'cuda' = @("11.8.0", "12.5.0")
+              'releasetag' = @("cuda")
+          }
+
+          $matrixOut = ConvertTo-Json $matrix -Compress
+          Write-Output ('matrix=' + $matrixOut) >> $env:GITHUB_OUTPUT
+
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build Wheel ${{ matrix.os }} ${{ matrix.pyver }} ${{ matrix.cuda }} ${{ matrix.releasetag == 'wheels' && 'AVX2' || matrix.releasetag }}
+    needs: define_matrix
     runs-on: ${{ matrix.os }}
     strategy:
-      matrix:
-        os: [ubuntu-20.04, windows-2019, macos-12]
+      matrix: ${{ fromJSON(needs.define_matrix.outputs.matrix) }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CUDAVER: ${{ matrix.cuda }}
+      AVXVER: ${{ matrix.releasetag }}
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-
-      # Used to host cibuildwheel
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Install dependencies (Linux/MacOS)
-        if: runner.os != 'Windows'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          RUST_LOG=trace python -m uv pip install -e .[all] --verbose
-        shell: bash
-
-      - name: Install dependencies (Windows)
+      - name: Add MSBuild to PATH
         if: runner.os == 'Windows'
-        env:
-          RUST_LOG: trace        
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          python -m uv pip install -e .[all] --verbose
-        shell: cmd
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.1
-        env:
-          # disable repair
-          CIBW_REPAIR_WHEEL_COMMAND: ""
+        uses: microsoft/setup-msbuild@v2
         with:
-          package-dir: .
-          output-dir: wheelhouse
+          vs-version: '[16.11,16.12)'
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ matrix.os }}
-          path: ./wheelhouse/*.whl
-
-  build_wheels_arm64:
-    name: Build arm64 wheels
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/arm64
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.1
-        env:
-          CIBW_SKIP: "*musllinux* pp*"
-          CIBW_REPAIR_WHEEL_COMMAND: ""
-          CIBW_ARCHS: "aarch64"
-          CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-*"
-        with:
-          output-dir: wheelhouse
-
-      - name: Upload wheels as artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels_arm64
-          path: ./wheelhouse/*.whl
-
-  build_sdist:
-    name: Build source distribution
-    runs-on: ubuntu-latest
-
-    steps:
       - uses: actions/checkout@v4
         with:
           submodules: "recursive"
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: ${{ matrix.pyver }}
+          cache: 'pip'
 
-      - name: Install dependencies (Linux/MacOS)
-        if: runner.os != 'Windows'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          RUST_LOG=trace python -m uv pip install -e .[all] --verbose
-          python -m uv pip install build
-        shell: bash
+      - name: Install miniforge
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest      
+          python-version: ${{ matrix.pyver }}   
+          activate-environment: ${{ github.event.inputs.target_folder }}/${{ github.event.inputs.build_folder }}
+          environment-file: ${{ github.event.inputs.build_folder }}/environment.yml        
+          auto-activate-base: false         
+          add-pip-as-python-dependency: true
 
-      - name: Install dependencies (Windows)
+      # - name: Setup Mamba
+      #   uses: conda-incubator/setup-miniconda@v3.0.4
+      #   with:
+      #     activate-environment: ${{ github.event.inputs.target_folder }}\${{ github.event.inputs.env_name }}
+      #     python-version: ${{ matrix.pyver }}
+      #     miniforge-variant: Mambaforge
+      #     miniforge-version: latest
+      #     use-mamba: true
+      #     add-pip-as-python-dependency: true
+      #     auto-activate-base: false
+
+      - name: VS Integration Cache
+        id: vs-integration-cache
         if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ./MSBuildExtensions
+          key: cuda-${{ matrix.cuda }}-vs-integration
+
+      - name: Get Visual Studio Integration
+        if: runner.os == 'Windows' && steps.vs-integration-cache.outputs.cache-hit != 'true'
+        run: |
+          if ($env:CUDAVER -eq '12.1.1') {$x = '12.1.0'} else {$x = $env:CUDAVER}
+          $links = (Invoke-RestMethod 'https://raw.githubusercontent.com/Jimver/cuda-toolkit/master/src/links/windows-links.ts').Trim().split().where({$_ -ne ''})
+          for ($i=$q=0;$i -lt $links.count -and $q -lt 2;$i++) {if ($links[$i] -eq "'$x',") {$q++}}
+          Invoke-RestMethod $links[$i].Trim("'") -OutFile 'cudainstaller.zip'
+          & 'C:\Program Files\7-Zip\7z.exe' e cudainstaller.zip -oMSBuildExtensions -r *\MSBuildExtensions\* > $null
+          Remove-Item 'cudainstaller.zip'
+
+      - name: Install Visual Studio Integration
+        if: runner.os == 'Windows'
+        run: |
+          $y = (gi '.\MSBuildExtensions').fullname + '\*'
+          (gi 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Microsoft\VC\*\BuildCustomizations').fullname.foreach({cp $y $_})
+          $cupath = 'CUDA_PATH_V' + $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','_')
+          echo "$cupath=$env:CONDA_PREFIX" >> $env:GITHUB_ENV
+
+      - name: Install Dependencies
         env:
-          RUST_LOG: trace        
+          MAMBA_DOWNLOAD_FAILFAST: "0"
+          MAMBA_NO_LOW_SPEED_LIMIT: "1"
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          python -m uv pip install -e .[all] --verbose
-          python -m uv pip install build
-        shell: cmd
+          $cudaVersion = $env:CUDAVER
+          conda install -y 'cuda' -c nvidia/label/cuda-$cudaVersion
+          python -m pip install build wheel
 
-      - name: Build source distribution
+      - name: Build Wheel
         run: |
-          python -m build --sdist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdist
-          path: ./dist/*.tar.gz
-
-  release:
-    name: Release
-    needs: [build_wheels, build_wheels_arm64, build_sdist]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-          path: dist
+          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
+          $env:CUDA_PATH = $env:CONDA_PREFIX
+          $env:CUDA_HOME = $env:CONDA_PREFIX
+          $env:CUDA_TOOLKIT_ROOT_DIR = $env:CONDA_PREFIX
+          if ($IsLinux) {
+            $env:LD_LIBRARY_PATH = $env:CONDA_PREFIX + '/lib:' + $env:LD_LIBRARY_PATH
+          }
+          $env:VERBOSE = '1'
+          $env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=all'
+          $env:CMAKE_ARGS = "-DGGML_CUDA_FORCE_MMQ=ON $env:CMAKE_ARGS"
+          # if ($env:AVXVER -eq 'AVX') {
+          $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX2=off -DGGML_FMA=off -DGGML_F16C=off'
+          # }
+          # if ($env:AVXVER -eq 'AVX512') {
+          #  $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX512=on'
+          # }
+          # if ($env:AVXVER -eq 'basic') {
+          #  $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=off -DGGML_AVX2=off -DGGML_FMA=off -DGGML_F16C=off'
+          # }
+          python -m build --wheel
+          # write the build tag to the output
+          Write-Output "CUDA_VERSION=$cudaVersion" >> $env:GITHUB_ENV
 
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          # Set tag_name to <tag>-cu<cuda_version>
+          tag_name: ${{ github.ref_name }}-cu${{ env.CUDA_VERSION }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
