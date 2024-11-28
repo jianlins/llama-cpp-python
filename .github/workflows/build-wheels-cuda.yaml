@@ -1,6 +1,23 @@
 name: Build Wheels (CUDA)
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      env_name:
+        description: "conda environmant name"
+        type: string   
+        required: false
+        default: 'win_llamacppgpu'
+      target_folder:
+        description: 'Envs path (must be on D drive)'
+        type: string
+        required: false
+        default: 'D:\conda_envs_jianlins'
+      zip_vol_size:
+        description: 'Max 7zip volumn size'
+        type: string
+        required: false
+        default: '400m'
 
 permissions:
   contents: write
@@ -20,9 +37,9 @@ jobs:
         id: set-matrix
         run: |
           $matrix = @{
-              'os' = @('ubuntu-latest', 'windows-2019')
-              'pyver' = @("3.9", "3.10", "3.11", "3.12")
-              'cuda' = @("12.1.1", "12.2.2", "12.3.2", "12.4.1", "12.5.0")
+              'os' = @('windows-latest')
+              'pyver' = @("3.10")
+              'cuda' = @("11.8.0")
               'releasetag' = @("basic")
           }
 
@@ -61,7 +78,7 @@ jobs:
       - name: Setup Mamba
         uses: conda-incubator/setup-miniconda@v3.0.4
         with:
-          activate-environment: "build"
+          activate-environment: ${{ github.event.inputs.target_folder }}\${{ github.event.inputs.env_name }}
           python-version: ${{ matrix.pyver }}
           miniforge-variant: Mambaforge
           miniforge-version: latest
@@ -136,3 +153,23 @@ jobs:
           tag_name: ${{ github.ref_name }}-cu${{ env.CUDA_VERSION }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+      - name: Check for 7-Zip installation
+        run: |
+          if (!(Test-Path "C:\Program Files\7-Zip\7z.exe")) {
+            choco install 7zip
+          }
+
+      - name: Compress and split folder
+        run: |
+          pwd
+          7z a -t7z -v${{ github.event.inputs.zip_vol_size }} zipped/${{ github.event.inputs.env_name }}.7z ${{ github.event.inputs.target_folder }}*
+          ls zipped
+    
+ 
+      - name: Upload compressed parts as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.env_name }}
+          path: zipped/*.7z.*
+          retention-days: 4
