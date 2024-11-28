@@ -1,4 +1,4 @@
-name: Build Conda Env (CUDA)
+name: Build Release (CUDA)
 
 on:
   workflow_dispatch:
