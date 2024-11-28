@@ -76,7 +76,6 @@ jobs:
           miniforge-version: latest      
           python-version: ${{ matrix.pyver }}   
           activate-environment: ${{ github.event.inputs.target_folder }}/${{ github.event.inputs.build_folder }}
-          environment-file: ${{ github.event.inputs.build_folder }}/environment.yml        
           auto-activate-base: false         
           add-pip-as-python-dependency: true
 
